@@ -1,8 +1,5 @@
 streamlit
 pandas
-folium
-streamlit-folium
-matplotlib
-seaborn
-scikit-learn
+numpy
+plotly
 openpyxl
