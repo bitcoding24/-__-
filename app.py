@@ -317,13 +317,25 @@ def simulate_one_group(group: pd.DataFrame, M0: float, K1: float, C: float, D: f
 
 @st.cache_data(show_spinner=False)
 def simulate_memory(calendar: pd.DataFrame, M0: float, K1: float, C: float, D: float, R: float) -> pd.DataFrame:
-    simulated = (
-        calendar.sort_values(["분석단위ID", "date"])
-        .groupby("분석단위ID", group_keys=False)
-        .apply(lambda g: simulate_one_group(g, M0, K1, C, D, R))
-    )
-    return simulated
+    if calendar.empty:
+        return calendar.copy()
 
+    results = []
+
+    sorted_calendar = calendar.sort_values(["분석단위ID", "date"]).copy()
+
+    for unit_id, group in sorted_calendar.groupby("분석단위ID", sort=False):
+        simulated_group = simulate_one_group(group.copy(), M0, K1, C, D, R)
+
+        # pandas groupby/apply 버전 차이로 식별자 열이 빠지는 상황 방지
+        if "분석단위ID" not in simulated_group.columns:
+            simulated_group["분석단위ID"] = unit_id
+
+        results.append(simulated_group)
+
+    simulated = pd.concat(results, ignore_index=True)
+
+    return simulated
 
 # =========================================================
 # 5. 학교별 요약
@@ -331,12 +343,21 @@ def simulate_memory(calendar: pd.DataFrame, M0: float, K1: float, C: float, D: f
 
 @st.cache_data(show_spinner=False)
 def summarize_school(simulated: pd.DataFrame, vacation_check: pd.DataFrame, high_risk_threshold: float, min_vacation_days: int) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    group_cols = [
+        "시도교육청코드", "시도교육청명", "행정표준코드", "학교명", "학교과정명", "분석단위ID", "학교표시명"
+    ]
+
+    missing_cols = [c for c in group_cols if c not in simulated.columns]
+    if missing_cols:
+        raise ValueError(
+            f"simulated 데이터에 필요한 열이 없습니다: {missing_cols} / "
+            f"현재 열 목록: {simulated.columns.tolist()}"
+        )
+
     analysis_data = simulated[simulated["is_main_analysis_day"]].copy()
 
     school_summary = (
-        analysis_data.groupby([
-            "시도교육청코드", "시도교육청명", "행정표준코드", "학교명", "학교과정명", "분석단위ID", "학교표시명"
-        ])
+        analysis_data.groupby(group_cols)
         .agg(
             분석일수=("date", "nunique"),
             휴업일수=("is_main_rest_day", "sum"),
@@ -372,6 +393,9 @@ def summarize_school(simulated: pd.DataFrame, vacation_check: pd.DataFrame, high
         on="분석단위ID",
         how="left",
     )
+
+    school_summary["방학일수"] = school_summary["방학일수"].fillna(0)
+    school_summary["추론방학일수"] = school_summary["추론방학일수"].fillna(0)
 
     core_summary = school_summary[school_summary["방학일수"] >= min_vacation_days].copy()
 
