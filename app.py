@@ -104,7 +104,7 @@ def clean_text_columns(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
 # 1. 데이터 로드
 # =========================================================
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=2)
 def load_uploaded_files(file_bytes_and_names: List[Tuple[bytes, str]]) -> pd.DataFrame:
     dfs = []
     encodings = ["utf-8-sig", "cp949", "euc-kr", "utf-8"]
@@ -135,7 +135,7 @@ def load_uploaded_files(file_bytes_and_names: List[Tuple[bytes, str]]) -> pd.Dat
 # 2. 학교-과정-날짜 단위 요약
 # =========================================================
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=2)
 def build_daily_school(df: pd.DataFrame, start_date: str, end_date: str) -> pd.DataFrame:
     df3 = df.copy()
     df3.columns = df3.columns.str.strip()
@@ -206,7 +206,7 @@ def build_daily_school(df: pd.DataFrame, start_date: str, end_date: str) -> pd.D
 # 3. 1년 전체 날짜표 생성
 # =========================================================
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=2)
 def build_calendar(daily_school: pd.DataFrame, start_date: str, end_date: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
     start_dt = pd.to_datetime(start_date)
     end_dt = pd.to_datetime(end_date)
@@ -315,7 +315,7 @@ def simulate_one_group(group: pd.DataFrame, M0: float, K1: float, C: float, D: f
     return group
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=2)
 def simulate_memory(calendar: pd.DataFrame, M0: float, K1: float, C: float, D: float, R: float) -> pd.DataFrame:
     if calendar.empty:
         return calendar.copy()
@@ -341,7 +341,7 @@ def simulate_memory(calendar: pd.DataFrame, M0: float, K1: float, C: float, D: f
 # 5. 학교별 요약
 # =========================================================
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=2)
 def summarize_school(simulated: pd.DataFrame, vacation_check: pd.DataFrame, high_risk_threshold: float, min_vacation_days: int) -> Tuple[pd.DataFrame, pd.DataFrame]:
     group_cols = [
         "시도교육청코드", "시도교육청명", "행정표준코드", "학교명", "학교과정명", "분석단위ID", "학교표시명"
@@ -575,6 +575,18 @@ with st.sidebar:
     run_btn = st.button("🚀 분석 실행", type="primary", use_container_width=True)
 
 if run_btn:
+    for key in [
+        "raw_df",
+        "daily_school",
+        "calendar",
+        "vacation_check",
+        "simulated",
+        "school_summary",
+        "core_summary",
+    ]:
+        if key in st.session_state:
+            del st.session_state[key]
+
     if not uploaded_files:
         st.error("먼저 CSV 파일을 업로드하세요.")
     else:
