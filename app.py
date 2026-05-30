@@ -75,6 +75,9 @@ DATA_CANDIDATES = [
     APP_DIR / "schedule_preprocessed_daily.csv.gz",
     APP_DIR / "data" / "schedule_preprocessed_daily.csv.gz",
     APP_DIR / "schedule_2025_04_preprocessed_daily.csv.gz",
+    # 압축하지 않은 원본 CSV도 함께 찾도록 추가 (gz가 없을 때 대비)
+    APP_DIR / "schedule_preprocessed_daily.csv",
+    APP_DIR / "data" / "schedule_preprocessed_daily.csv",
 ]
 
 REQUIRED_PREPROCESSED_COLUMNS = [
@@ -587,15 +590,17 @@ DISPLAY_RENAME = {
 
 
 st.title("📚 학사일정 기반 학습 공백 위험지수 대시보드")
-st.caption("Colab에서 전처리한 경량 CSV.GZ를 읽어 학교별 위험지수를 계산합니다.")
+st.caption("앱에 포함된 전처리 데이터를 자동으로 읽어 학교별 위험지수를 계산합니다. (별도 업로드 불필요)")
 
 with st.sidebar:
     st.header("1. 데이터")
-    uploaded_file = st.file_uploader(
-        "전처리된 CSV.GZ 파일을 업로드하세요.",
-        type=["gz", "csv"],
-        accept_multiple_files=False,
-    )
+    # 기본은 앱에 포함된 데이터 자동 사용. 다른 데이터로 바꾸고 싶을 때만 업로드.
+    with st.expander("데이터 교체 (선택)", expanded=False):
+        uploaded_file = st.file_uploader(
+            "다른 전처리 CSV / CSV.GZ 파일로 교체하려면 업로드하세요.",
+            type=["gz", "csv"],
+            accept_multiple_files=False,
+        )
 
 packaged_data = find_packaged_data()
 try:
@@ -606,7 +611,10 @@ try:
         daily_data = load_preprocessed_from_path(str(packaged_data), packaged_data.stat().st_mtime)
         source_label = packaged_data.name
     else:
-        st.info("전처리된 `schedule_preprocessed_daily.csv.gz` 파일을 앱 폴더에 두거나 왼쪽에서 업로드하세요.")
+        st.error(
+            "앱 폴더에서 `schedule_preprocessed_daily.csv.gz` 파일을 찾지 못했습니다. "
+            "app.py와 같은 폴더(또는 data/ 폴더)에 데이터 파일을 함께 올려 주세요."
+        )
         st.stop()
 except Exception as exc:
     st.error(f"전처리 데이터를 읽지 못했습니다: {exc}")
@@ -640,18 +648,37 @@ with st.sidebar:
         step=1,
     )
 
-    run_btn = st.button("🚀 분석 실행", type="primary", use_container_width=True)
+    st.caption("파라미터를 바꾼 뒤에는 아래 버튼을 눌러 다시 계산하세요.")
+    run_btn = st.button("🔄 파라미터로 다시 분석", type="primary", use_container_width=True)
 
 if start_date > end_date:
     st.error("시작일은 종료일보다 늦을 수 없습니다.")
     st.stop()
 
-if run_btn:
-    for key in ["calendar", "vacation_check", "simulated", "school_summary", "core_summary"]:
-        if key in st.session_state:
-            del st.session_state[key]
+# 입력값 서명: 데이터/기간/파라미터가 바뀌면 자동으로 재계산하기 위함
+params_signature = (
+    source_label,
+    str(start_date),
+    str(end_date),
+    float(M0),
+    float(K1),
+    float(C),
+    float(D),
+    float(R),
+    float(high_risk_threshold),
+    int(min_vacation_days),
+)
 
-    with st.spinner("1년 전체 날짜표를 만드는 중..."):
+# 페이지에 처음 들어왔거나, 입력값이 바뀌었거나, 버튼을 누르면 자동으로 분석을 실행한다.
+# (학교 선택·달력 월 변경 등 입력값과 무관한 조작에는 캐시된 결과를 재사용한다.)
+needs_run = (
+    "core_summary" not in st.session_state
+    or st.session_state.get("params_signature") != params_signature
+    or run_btn
+)
+
+if needs_run:
+    with st.spinner("전체 날짜표를 만드는 중..."):
         calendar, vacation_check = build_calendar(daily_data, str(start_date), str(end_date))
     if calendar.empty:
         st.warning("선택한 기간에 분석할 데이터가 없습니다.")
@@ -672,10 +699,10 @@ if run_btn:
     st.session_state["simulated"] = simulated
     st.session_state["school_summary"] = school_summary
     st.session_state["core_summary"] = core_summary
-    st.success("분석 완료!")
+    st.session_state["params_signature"] = params_signature
 
 if "core_summary" not in st.session_state:
-    st.info("왼쪽에서 전처리 데이터를 확인하고 분석 실행 버튼을 누르세요.")
+    st.warning("분석할 데이터가 없습니다. 데이터 파일을 확인하세요.")
     st.stop()
 
 core_summary = st.session_state["core_summary"].copy()
