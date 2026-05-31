@@ -207,57 +207,92 @@ def build_daily_school(df: pd.DataFrame, start_date: str, end_date: str) -> pd.D
 # =========================================================
 
 @st.cache_data(show_spinner=False, max_entries=2)
-def build_calendar(daily_school: pd.DataFrame, start_date: str, end_date: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    start_dt = pd.to_datetime(start_date)
-    end_dt = pd.to_datetime(end_date)
+def assign_term_quarters(calendar: pd.DataFrame) -> pd.DataFrame:
+    """
+    방학을 기준으로 학기를 나누고,
+    각 학기를 다시 전반/후반 2개 분기로 나눈다.
 
-    all_dates = pd.DataFrame({"date": pd.date_range(start_dt, end_dt, freq="D")})
+    일반적인 경우:
+    - 1학기_1분기
+    - 1학기_2분기
+    - 방학
+    - 2학기_1분기
+    - 2학기_2분기
 
-    unit_cols = [
-        "시도교육청코드", "시도교육청명", "행정표준코드", "학교명", "학교과정명", "분석단위ID", "학교표시명"
-    ]
-    units = daily_school[unit_cols].drop_duplicates().copy()
-    calendar = units.merge(all_dates, how="cross")
+    방학일은 term_quarter = "방학"으로 둔다.
+    """
 
-    merge_cols = [
-        "분석단위ID", "date", "is_rest_event", "is_vacation_day", "is_term_rest_day",
-        "행사개수", "행사명_목록", "수업공제일명_목록"
-    ]
-    calendar = calendar.merge(daily_school[merge_cols], on=["분석단위ID", "date"], how="left")
+    if calendar.empty:
+        return calendar.copy()
 
-    bool_cols = ["is_rest_event", "is_vacation_day", "is_term_rest_day"]
-    for col in bool_cols:
-        calendar[col] = calendar[col].fillna(False).astype(bool)
+    out = calendar.sort_values(["분석단위ID", "date"]).copy()
 
-    calendar["행사개수"] = calendar["행사개수"].fillna(0).astype(int)
-    calendar["행사명_목록"] = calendar["행사명_목록"].fillna("")
-    calendar["수업공제일명_목록"] = calendar["수업공제일명_목록"].fillna("")
+    pieces = []
 
-    calendar["요일번호"] = calendar["date"].dt.weekday
-    calendar["is_weekend"] = calendar["요일번호"] >= 5
+    for unit_id, g in out.groupby("분석단위ID", sort=False):
+        g = g.sort_values("date").copy()
 
-    calendar["is_main_rest_day"] = (~calendar["is_vacation_day"]) & (
-        calendar["is_weekend"] | calendar["is_term_rest_day"]
-    )
-    calendar["is_main_analysis_day"] = ~calendar["is_vacation_day"]
-    calendar["is_study_day"] = calendar["is_main_analysis_day"] & ~calendar["is_main_rest_day"]
+        g["term_block"] = np.nan
+        g["term_quarter_id"] = np.nan
+        g["term_quarter"] = "방학"
+        g["is_quarter_start"] = False
 
-    vacation_check = (
-        calendar.groupby([
-            "시도교육청명", "행정표준코드", "학교명", "학교과정명", "분석단위ID", "학교표시명"
-        ])
-        .agg(
-            전체일수=("date", "nunique"),
-            방학일수=("is_vacation_day", "sum"),
-            메인분석일수=("is_main_analysis_day", "sum"),
-            휴업일수=("is_main_rest_day", "sum"),
-            수업일수=("is_study_day", "sum"),
-        )
-        .reset_index()
-    )
-    vacation_check["추론방학일수"] = 0
+        analysis_mask = g["is_main_analysis_day"].to_numpy()
 
-    return calendar, vacation_check
+        # 방학이 아닌 구간이 새로 시작되는 지점 = 학기 시작
+        prev_analysis = np.r_[False, analysis_mask[:-1]]
+        block_start = analysis_mask & ~prev_analysis
+
+        block_numbers = np.cumsum(block_start)
+        block_numbers = np.where(analysis_mask, block_numbers, np.nan)
+
+        g["term_block"] = block_numbers
+
+        valid_blocks = [
+            int(x)
+            for x in pd.Series(block_numbers).dropna().unique()
+        ]
+
+        for block in valid_blocks:
+            idx = g.index[g["term_block"] == block].tolist()
+
+            if len(idx) == 0:
+                continue
+
+            # 학기 이름
+            if block == 1:
+                term_name = "1학기"
+            elif block == 2:
+                term_name = "2학기"
+            else:
+                term_name = f"{block}번째학기"
+
+            # 해당 학기 날짜를 반으로 나누기
+            half = (len(idx) + 1) // 2
+
+            first_half_idx = idx[:half]
+            second_half_idx = idx[half:]
+
+            q1_id = (block - 1) * 2 + 1
+            q2_id = (block - 1) * 2 + 2
+
+            g.loc[first_half_idx, "term_quarter_id"] = q1_id
+            g.loc[first_half_idx, "term_quarter"] = f"{term_name}_1분기"
+
+            if second_half_idx:
+                g.loc[second_half_idx, "term_quarter_id"] = q2_id
+                g.loc[second_half_idx, "term_quarter"] = f"{term_name}_2분기"
+
+        # 분기 시작일 표시
+        quarter_id = g["term_quarter_id"]
+        quarter_start = quarter_id.notna() & quarter_id.ne(quarter_id.shift())
+        g.loc[quarter_start, "is_quarter_start"] = True
+
+        pieces.append(g)
+
+    result = pd.concat(pieces, ignore_index=True)
+
+    return result
 
 
 # =========================================================
@@ -266,36 +301,68 @@ def build_calendar(daily_school: pd.DataFrame, start_date: str, end_date: str) -
 
 def simulate_one_group(group: pd.DataFrame, M0: float, K1: float, C: float, D: float, R: float) -> pd.DataFrame:
     group = group.sort_values("date").copy()
+
     memory = M0
     p = 0
+    last_quarter_id = None
 
     memory_scores = []
     risk_scores = []
     k_values = []
     p_values = []
+    quarter_reset_values = []
     calculation_types = []
 
     for _, row in group.iterrows():
+        # 방학일은 계산 제외
         if not row["is_main_analysis_day"]:
             memory_scores.append(np.nan)
             risk_scores.append(np.nan)
             k_values.append(np.nan)
             p_values.append(np.nan)
+            quarter_reset_values.append(False)
             calculation_types.append("방학 제외")
+
+            # 방학 이후 새 학기/분기가 시작될 수 있으므로 초기화
             memory = M0
             p = 0
+            last_quarter_id = None
             continue
+
+        current_quarter_id = row.get("term_quarter_id", np.nan)
+
+        # 새 분기가 시작되면 k 계산의 기준이 되는 p를 초기화
+        is_new_quarter = (
+            pd.notna(current_quarter_id)
+            and current_quarter_id != last_quarter_id
+        )
+
+        if is_new_quarter:
+            p = 0
+            last_quarter_id = current_quarter_id
+
+            # 분기마다 기억점수도 100으로 새로 시작하고 싶으면 아래 줄의 주석을 해제하면 됨
+            # memory = M0
 
         if row["is_main_rest_day"]:
             p += 1
             k = K1 / ((1 + C * p) ** D)
             memory = memory * math.exp(-k)
-            calculation_type = "휴업일_망각"
+
+            if is_new_quarter:
+                calculation_type = "분기시작_휴업일_망각"
+            else:
+                calculation_type = "휴업일_망각"
+
         else:
             memory = memory + R * (M0 - memory)
             p = 0
             k = 0.0
-            calculation_type = "수업일_회복"
+
+            if is_new_quarter:
+                calculation_type = "분기시작_수업일_회복"
+            else:
+                calculation_type = "수업일_회복"
 
         memory = max(0.0, min(M0, memory))
         risk = M0 - memory
@@ -304,16 +371,17 @@ def simulate_one_group(group: pd.DataFrame, M0: float, K1: float, C: float, D: f
         risk_scores.append(risk)
         k_values.append(k)
         p_values.append(p)
+        quarter_reset_values.append(is_new_quarter)
         calculation_types.append(calculation_type)
 
     group["memory_score"] = memory_scores
     group["risk_score"] = risk_scores
     group["k_value"] = k_values
     group["p_value"] = p_values
+    group["quarter_reset"] = quarter_reset_values
     group["calculation_type"] = calculation_types
 
     return group
-
 
 @st.cache_data(show_spinner=False, max_entries=2)
 def simulate_memory(calendar: pd.DataFrame, M0: float, K1: float, C: float, D: float, R: float) -> pd.DataFrame:
@@ -428,14 +496,52 @@ def make_memory_figure(one_school: pd.DataFrame, school_name: str) -> go.Figure:
     df["risk_plot"] = df["risk_score"].where(~df["is_vacation_day"], np.nan)
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df["date"], y=df["memory_plot"], mode="lines", name="기억점수", connectgaps=False))
-    fig.add_trace(go.Scatter(x=df["date"], y=df["risk_plot"], mode="lines", name="위험점수", connectgaps=False))
+
+    fig.add_trace(go.Scatter(
+        x=df["date"],
+        y=df["memory_plot"],
+        mode="lines",
+        name="기억점수",
+        connectgaps=False
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=df["date"],
+        y=df["risk_plot"],
+        mode="lines",
+        name="위험점수",
+        connectgaps=False
+    ))
 
     rest = df[df["is_main_rest_day"]]
     fig.add_trace(go.Scatter(
-        x=rest["date"], y=rest["memory_score"], mode="markers", name="휴업일",
+        x=rest["date"],
+        y=rest["memory_score"],
+        mode="markers",
+        name="휴업일",
         marker=dict(size=5)
     ))
+
+    if "quarter_reset" in df.columns:
+        quarter_start = df[df["quarter_reset"] == True].copy()
+
+        fig.add_trace(go.Scatter(
+            x=quarter_start["date"],
+            y=quarter_start["memory_score"],
+            mode="markers",
+            name="분기 시작",
+            marker=dict(size=10, symbol="diamond"),
+            customdata=quarter_start[["term_quarter", "p_value", "k_value"]],
+            hovertemplate=(
+                "분기 시작<br>"
+                "날짜=%{x}<br>"
+                "기억점수=%{y:.2f}<br>"
+                "분기=%{customdata[0]}<br>"
+                "p=%{customdata[1]}<br>"
+                "k=%{customdata[2]:.4f}"
+                "<extra></extra>"
+            )
+        ))
 
     fig.update_layout(
         title=f"{school_name} 날짜별 기억점수·위험점수 변화",
@@ -443,11 +549,17 @@ def make_memory_figure(one_school: pd.DataFrame, school_name: str) -> go.Figure:
         yaxis_title="점수",
         yaxis=dict(range=[0, 100]),
         height=430,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        ),
         margin=dict(l=20, r=20, t=70, b=20),
     )
-    return fig
 
+    return fig
 
 def make_calendar_html(one_school: pd.DataFrame, month: str) -> str:
     df = one_school.copy()
@@ -597,6 +709,8 @@ if run_btn:
             daily_school = build_daily_school(raw_df, str(start_date), str(end_date))
         with st.spinner("1년 전체 날짜표를 만드는 중..."):
             calendar, vacation_check = build_calendar(daily_school, str(start_date), str(end_date))
+        with st.spinner("학기별 분기를 나누는 중..."):    
+            calendar = assign_term_quarters(calendar)
         with st.spinner("기억점수와 위험점수를 계산하는 중... 데이터가 크면 시간이 걸릴 수 있어요."):
             simulated = simulate_memory(calendar, M0, K1, C, D, R)
         with st.spinner("학교별 최종 위험지수를 요약하는 중..."):
@@ -754,9 +868,23 @@ components.html(make_calendar_html(one_school, calendar_month), height=720, scro
 
 with st.expander("선택 학교 날짜별 데이터 보기", expanded=False):
     detail_cols = [
-        "date", "is_vacation_day", "is_main_rest_day", "is_study_day", "memory_score", "risk_score",
-        "p_value", "k_value", "calculation_type", "행사명_목록"
+        "date",
+        "term_quarter",
+        "is_quarter_start",
+        "quarter_reset",
+        "is_vacation_day",
+        "is_main_rest_day",
+        "is_study_day",
+        "memory_score",
+        "risk_score",
+        "p_value",
+        "k_value",
+        "calculation_type",
+        "행사명_목록",
     ]
+
+    detail_cols = [c for c in detail_cols if c in one_school.columns]
+
     st.dataframe(one_school[detail_cols], use_container_width=True, height=400)
 
 # =========================================================
