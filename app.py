@@ -283,7 +283,7 @@ def simulate_one_group(group: pd.DataFrame, M0: float, K1: float, C: float, D: f
             p_values.append(np.nan)
             calculation_types.append("방학 제외")
             memory = M0
-            p = 0
+            p += 0
             continue
 
         if row["is_main_rest_day"]:
