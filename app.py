@@ -71,13 +71,18 @@ st.markdown(
 
 
 APP_DIR = Path(__file__).resolve().parent
+# 일반고/자율고 + 초·중학교(특수학교 제외) 전처리 결과 파일.
+# 웹 배포 시 app.py와 같은 폴더(또는 data/ 폴더)에 함께 올린다.
 DATA_CANDIDATES = [
+    APP_DIR / "ge_schedule_target_daily.csv.gz",
+    APP_DIR / "data" / "ge_schedule_target_daily.csv.gz",
+    APP_DIR / "ge_schedule_target_daily.csv",
+    APP_DIR / "data" / "ge_schedule_target_daily.csv",
+    # 이전 파일명도 호환 유지 (있으면 사용)
     APP_DIR / "ge_schedule_preprocessed_daily.csv.gz",
     APP_DIR / "data" / "ge_schedule_preprocessed_daily.csv.gz",
-    APP_DIR / "schedule_2025_04_preprocessed_daily.csv.gz",
-    # 압축하지 않은 원본 CSV도 함께 찾도록 추가 (gz가 없을 때 대비)
-    APP_DIR / "ge_schedule_preprocessed_daily.csv",
-    APP_DIR / "data" / "ge_schedule_preprocessed_daily.csv",
+    APP_DIR / "schedule_target_daily.csv.gz",
+    APP_DIR / "data" / "schedule_target_daily.csv.gz",
 ]
 
 REQUIRED_PREPROCESSED_COLUMNS = [
@@ -190,6 +195,13 @@ def to_excel_bytes(dfs: dict) -> bytes:
             df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
     return output.getvalue()
 
+
+# =========================================================
+# 기억점수 시뮬레이션
+#   - 친구가 튜닝한 수치/모델식을 그대로 사용한다.
+#   - 휴업일 망각: k = K1 / ((1 + C*p)^D),  memory *= exp(-k)
+#   - 수업일 회복: memory += R * (M0 - memory)
+# =========================================================
 
 def simulate_one_group(group: pd.DataFrame, M0: float, K1: float, C: float, D: float, R: float) -> pd.DataFrame:
     group = group.sort_values("date").copy()
@@ -590,7 +602,7 @@ DISPLAY_RENAME = {
 
 
 st.title("📚 학사일정 기반 학습 공백 위험지수 대시보드")
-st.caption("앱에 포함된 전처리 데이터를 자동으로 읽어 학교별 위험지수를 계산합니다. (별도 업로드 불필요)")
+st.caption("앱에 포함된 전처리 데이터(일반고·자율고·초·중학교)를 자동으로 읽어 학교별 위험지수를 계산합니다. (별도 업로드 불필요)")
 
 with st.sidebar:
     st.header("1. 데이터")
@@ -612,7 +624,7 @@ try:
         source_label = packaged_data.name
     else:
         st.error(
-            "앱 폴더에서 `ge_schedule_preprocessed_daily.csv.gz` 파일을 찾지 못했습니다. "
+            "앱 폴더에서 `ge_schedule_target_daily.csv.gz` 파일을 찾지 못했습니다. "
             "app.py와 같은 폴더(또는 data/ 폴더)에 데이터 파일을 함께 올려 주세요."
         )
         st.stop()
