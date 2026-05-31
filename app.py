@@ -775,3 +775,4 @@ st.download_button(
     data=excel_bytes,
     file_name="학습공백_위험지수_분석결과.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
