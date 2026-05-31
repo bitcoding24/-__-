@@ -732,7 +732,7 @@ with st.sidebar:
         accept_multiple_files=True,
     )
 
-        st.header("2. 분석 기간")
+    st.header("2. 분석 기간")
     start_date = st.date_input("시작일", value=pd.to_datetime("2025-03-01"))
     end_date = st.date_input("종료일", value=pd.to_datetime("2026-02-28"))
 
