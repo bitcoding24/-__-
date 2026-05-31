@@ -216,31 +216,41 @@ def simulate_one_group(group: pd.DataFrame, M0: float, K1: float, C: float, D: f
     calculation_types: list[str] = []
 
     memory = M0
-    p = 0
+
+    # p는 이제 '연속 휴업일 수'가 아니라 '누적 복습/수업 횟수'로 사용한다.
+    review_count = 0
 
     for i in range(n):
+        # 방학은 분석에서 제외하고, 방학 이후에는 새 학습 구간으로 다시 시작
         if not main_analysis[i]:
             calculation_types.append("방학 제외")
             memory = M0
-            p = 0
+            review_count = 0
             continue
 
         if main_rest[i]:
-            p += 1
-            k = K1 / ((1 + C * p) ** D)
+            # 휴업일: 마지막까지 누적된 복습 횟수에 따라 망각 속도 k가 결정됨
+            # 복습 횟수 review_count가 많을수록 k가 작아져서 곡선이 완만해짐
+            k = K1 / ((1 + C * review_count) ** D)
             memory = memory * math.exp(-k)
             calculation_type = "휴업일_망각"
+
         else:
+            # 수업일: 복습이 1회 추가된 것으로 보고 기억점수 회복
+            review_count += 1
+            k = K1 / ((1 + C * review_count) ** D)
             memory = memory + R * (M0 - memory)
-            p = 0
-            k = 0.0
-            calculation_type = "수업일_회복"
+            calculation_type = "수업일_복습회복"
 
         memory = max(0.0, min(M0, memory))
+
         memory_scores[i] = memory
         risk_scores[i] = M0 - memory
         k_values[i] = k
-        p_values[i] = p
+
+        # 기존 p_value 열은 유지하되, 의미를 '누적 복습 횟수'로 바꿈
+        p_values[i] = review_count
+
         calculation_types.append(calculation_type)
 
     group["memory_score"] = memory_scores
@@ -318,6 +328,7 @@ def build_calendar(daily_data: pd.DataFrame, start_date: str, end_date: str) -> 
 
 
 @st.cache_data(show_spinner=False, max_entries=2)
+@st.cache_data(show_spinner=False, max_entries=2)
 def simulate_memory(calendar: pd.DataFrame, M0: float, K1: float, C: float, D: float, R: float) -> pd.DataFrame:
     if calendar.empty:
         return calendar.copy()
@@ -336,36 +347,49 @@ def simulate_memory(calendar: pd.DataFrame, M0: float, K1: float, C: float, D: f
 
     current_unit = None
     memory = M0
-    p = 0
+
+    # p는 이제 '연속 휴업일 수'가 아니라 '누적 복습/수업 횟수'
+    review_count = 0
 
     for i in range(n):
+        # 학교가 바뀌면 기억점수와 복습 횟수 초기화
         if unit_ids[i] != current_unit:
             current_unit = unit_ids[i]
             memory = M0
-            p = 0
+            review_count = 0
 
+        # 방학은 분석 제외
+        # 방학 이후는 새 학습 구간으로 보고 복습 횟수도 초기화
         if not main_analysis[i]:
             calculation_types.append("방학 제외")
             memory = M0
-            p = 0
+            review_count = 0
             continue
 
         if main_rest[i]:
-            p += 1
-            k = K1 / ((1 + C * p) ** D)
+            # 휴업일/주말: 누적 복습 횟수에 따라 망각 속도 결정
+            # review_count가 클수록 k가 작아져서 망각곡선이 완만해짐
+            k = K1 / ((1 + C * review_count) ** D)
             memory = memory * math.exp(-k)
             calculation_type = "휴업일_망각"
+
         else:
+            # 수업일: 복습이 한 번 이루어진 것으로 보고 review_count 증가
+            # 이후 휴업일의 k가 더 작아짐
+            review_count += 1
+            k = K1 / ((1 + C * review_count) ** D)
             memory = memory + R * (M0 - memory)
-            p = 0
-            k = 0.0
-            calculation_type = "수업일_회복"
+            calculation_type = "수업일_복습회복"
 
         memory = max(0.0, min(M0, memory))
+
         memory_scores[i] = memory
         risk_scores[i] = M0 - memory
         k_values[i] = k
-        p_values[i] = p
+
+        # 기존 p_value 열은 유지하되, 의미를 '누적 복습 횟수'로 바꿈
+        p_values[i] = review_count
+
         calculation_types.append(calculation_type)
 
     sorted_calendar["memory_score"] = memory_scores
@@ -373,6 +397,7 @@ def simulate_memory(calendar: pd.DataFrame, M0: float, K1: float, C: float, D: f
     sorted_calendar["k_value"] = k_values
     sorted_calendar["p_value"] = p_values
     sorted_calendar["calculation_type"] = calculation_types
+
     return sorted_calendar.reset_index(drop=True)
 
 
