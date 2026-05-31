@@ -104,7 +104,7 @@ def clean_text_columns(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
 # 1. 데이터 로드
 # =========================================================
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=2)
 def load_uploaded_files(file_bytes_and_names: List[Tuple[bytes, str]]) -> pd.DataFrame:
     dfs = []
     encodings = ["utf-8-sig", "cp949", "euc-kr", "utf-8"]
@@ -135,7 +135,7 @@ def load_uploaded_files(file_bytes_and_names: List[Tuple[bytes, str]]) -> pd.Dat
 # 2. 학교-과정-날짜 단위 요약
 # =========================================================
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=2)
 def build_daily_school(df: pd.DataFrame, start_date: str, end_date: str) -> pd.DataFrame:
     df3 = df.copy()
     df3.columns = df3.columns.str.strip()
@@ -206,7 +206,7 @@ def build_daily_school(df: pd.DataFrame, start_date: str, end_date: str) -> pd.D
 # 3. 1년 전체 날짜표 생성
 # =========================================================
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=2)
 def build_calendar(daily_school: pd.DataFrame, start_date: str, end_date: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
     start_dt = pd.to_datetime(start_date)
     end_dt = pd.to_datetime(end_date)
@@ -283,7 +283,7 @@ def simulate_one_group(group: pd.DataFrame, M0: float, K1: float, C: float, D: f
             p_values.append(np.nan)
             calculation_types.append("방학 제외")
             memory = M0
-            p += 0
+            p = 0
             continue
 
         if row["is_main_rest_day"]:
@@ -315,28 +315,49 @@ def simulate_one_group(group: pd.DataFrame, M0: float, K1: float, C: float, D: f
     return group
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=2)
 def simulate_memory(calendar: pd.DataFrame, M0: float, K1: float, C: float, D: float, R: float) -> pd.DataFrame:
-    simulated = (
-        calendar.sort_values(["분석단위ID", "date"])
-        .groupby("분석단위ID", group_keys=False)
-        .apply(lambda g: simulate_one_group(g, M0, K1, C, D, R))
-    )
-    return simulated
+    if calendar.empty:
+        return calendar.copy()
 
+    results = []
+
+    sorted_calendar = calendar.sort_values(["분석단위ID", "date"]).copy()
+
+    for unit_id, group in sorted_calendar.groupby("분석단위ID", sort=False):
+        simulated_group = simulate_one_group(group.copy(), M0, K1, C, D, R)
+
+        # pandas groupby/apply 버전 차이로 식별자 열이 빠지는 상황 방지
+        if "분석단위ID" not in simulated_group.columns:
+            simulated_group["분석단위ID"] = unit_id
+
+        results.append(simulated_group)
+
+    simulated = pd.concat(results, ignore_index=True)
+
+    return simulated
 
 # =========================================================
 # 5. 학교별 요약
 # =========================================================
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=2)
 def summarize_school(simulated: pd.DataFrame, vacation_check: pd.DataFrame, high_risk_threshold: float, min_vacation_days: int) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    group_cols = [
+        "시도교육청코드", "시도교육청명", "행정표준코드", "학교명", "학교과정명", "분석단위ID", "학교표시명"
+    ]
+
+    missing_cols = [c for c in group_cols if c not in simulated.columns]
+    if missing_cols:
+        raise ValueError(
+            f"simulated 데이터에 필요한 열이 없습니다: {missing_cols} / "
+            f"현재 열 목록: {simulated.columns.tolist()}"
+        )
+
     analysis_data = simulated[simulated["is_main_analysis_day"]].copy()
 
     school_summary = (
-        analysis_data.groupby([
-            "시도교육청코드", "시도교육청명", "행정표준코드", "학교명", "학교과정명", "분석단위ID", "학교표시명"
-        ])
+        analysis_data.groupby(group_cols)
         .agg(
             분석일수=("date", "nunique"),
             휴업일수=("is_main_rest_day", "sum"),
@@ -372,6 +393,9 @@ def summarize_school(simulated: pd.DataFrame, vacation_check: pd.DataFrame, high
         on="분석단위ID",
         how="left",
     )
+
+    school_summary["방학일수"] = school_summary["방학일수"].fillna(0)
+    school_summary["추론방학일수"] = school_summary["추론방학일수"].fillna(0)
 
     core_summary = school_summary[school_summary["방학일수"] >= min_vacation_days].copy()
 
@@ -551,6 +575,18 @@ with st.sidebar:
     run_btn = st.button("🚀 분석 실행", type="primary", use_container_width=True)
 
 if run_btn:
+    for key in [
+        "raw_df",
+        "daily_school",
+        "calendar",
+        "vacation_check",
+        "simulated",
+        "school_summary",
+        "core_summary",
+    ]:
+        if key in st.session_state:
+            del st.session_state[key]
+
     if not uploaded_files:
         st.error("먼저 CSV 파일을 업로드하세요.")
     else:
@@ -652,28 +688,194 @@ g1, g2 = st.columns(2)
 
 region_summary = (
     core_summary.groupby("시도교육청명")
-    .agg(학교수=("분석단위ID", "count"), 평균최종위험지수=("최종위험지수", "mean"), 평균휴업일비율=("휴업일비율", "mean"))
+    .agg(
+        학교수=("분석단위ID", "count"),
+        평균최종위험지수=("최종위험지수", "mean"),
+        평균휴업일비율=("휴업일비율", "mean"),
+    )
     .reset_index()
     .sort_values("평균최종위험지수", ascending=False)
 )
+
 course_summary = (
     core_summary.groupby("학교과정명")
-    .agg(학교수=("분석단위ID", "count"), 평균최종위험지수=("최종위험지수", "mean"), 평균휴업일비율=("휴업일비율", "mean"))
+    .agg(
+        학교수=("분석단위ID", "count"),
+        평균최종위험지수=("최종위험지수", "mean"),
+        평균휴업일비율=("휴업일비율", "mean"),
+    )
     .reset_index()
     .sort_values("평균최종위험지수", ascending=False)
 )
 
+
+def get_zoom_axis(series: pd.Series, min_span: float = 1.0, pad_ratio: float = 0.18) -> Tuple[List[float], float]:
+    """
+    평균 위험지수 값들이 서로 비슷할 때 차이가 잘 보이도록 축 범위를 자동 확대한다.
+    단, 그래프가 과도하게 길어 보이지 않도록 최소 표시 폭과 여백을 제한한다.
+    """
+    values = pd.to_numeric(series, errors="coerce").dropna()
+
+    if values.empty:
+        return [0.0, 1.0], 0.1
+
+    v_min = float(values.min())
+    v_max = float(values.max())
+    data_span = v_max - v_min
+
+    if data_span == 0:
+        center = v_min
+        half_span = min_span / 2
+        axis_min = center - half_span
+        axis_max = center + half_span
+    else:
+        span = max(data_span, min_span)
+        padding = span * pad_ratio
+        center = (v_min + v_max) / 2
+        axis_min = center - span / 2 - padding
+        axis_max = center + span / 2 + padding
+
+    axis_min = max(0.0, axis_min)
+
+    axis_span = axis_max - axis_min
+
+    if axis_span <= 0.5:
+        dtick = 0.05
+    elif axis_span <= 1.5:
+        dtick = 0.1
+    elif axis_span <= 3:
+        dtick = 0.2
+    elif axis_span <= 6:
+        dtick = 0.5
+    else:
+        dtick = 1.0
+
+    return [axis_min, axis_max], dtick
+
+
+region_x_range, region_x_dtick = get_zoom_axis(
+    region_summary["평균최종위험지수"],
+    min_span=1.0,
+)
+
+course_y_range, course_y_dtick = get_zoom_axis(
+    course_summary["평균최종위험지수"],
+    min_span=1.0,
+)
+
+# 시도교육청 그래프는 항목 수가 많으므로 높이를 자동 조절하되 너무 길어지지 않도록 상한을 둔다.
+region_fig_height = min(520, max(380, 24 * len(region_summary) + 150))
+course_fig_height = 420
+
 with g1:
-    st.plotly_chart(px.bar(region_summary, x="평균최종위험지수", y="시도교육청명", orientation="h", title="시도교육청별 평균 위험지수"), use_container_width=True)
+    region_fig = px.bar(
+        region_summary,
+        x="평균최종위험지수",
+        y="시도교육청명",
+        orientation="h",
+        title="시도교육청별 평균 위험지수",
+        labels={
+            "평균최종위험지수": "평균 위험지수",
+            "시도교육청명": "시도교육청",
+        },
+        text="평균최종위험지수",
+    )
+
+    region_fig.update_traces(
+        texttemplate="%{x:.2f}",
+        textposition="outside",
+        cliponaxis=False,
+    )
+
+    region_fig.update_xaxes(
+        range=region_x_range,
+        dtick=region_x_dtick,
+        tickformat=".2f",
+        title="평균 위험지수",
+    )
+
+    region_fig.update_yaxes(
+        categoryorder="array",
+        categoryarray=region_summary["시도교육청명"].iloc[::-1].tolist(),
+        title="시도교육청",
+    )
+
+    region_fig.update_layout(
+        height=region_fig_height,
+        margin=dict(l=10, r=60, t=60, b=40),
+    )
+
+    st.plotly_chart(region_fig, use_container_width=True)
+
 with g2:
-    st.plotly_chart(px.bar(course_summary, x="학교과정명", y="평균최종위험지수", title="학교과정별 평균 위험지수"), use_container_width=True)
+    course_fig = px.bar(
+        course_summary,
+        x="학교과정명",
+        y="평균최종위험지수",
+        title="학교과정별 평균 위험지수",
+        labels={
+            "학교과정명": "학교과정",
+            "평균최종위험지수": "평균 위험지수",
+        },
+        text="평균최종위험지수",
+    )
+
+    course_fig.update_traces(
+        texttemplate="%{y:.2f}",
+        textposition="outside",
+        cliponaxis=False,
+    )
+
+    course_fig.update_yaxes(
+        range=course_y_range,
+        dtick=course_y_dtick,
+        tickformat=".2f",
+        title="평균 위험지수",
+    )
+
+    course_fig.update_xaxes(
+        title="학교과정",
+    )
+
+    course_fig.update_layout(
+        height=course_fig_height,
+        margin=dict(l=10, r=35, t=60, b=40),
+    )
+
+    st.plotly_chart(course_fig, use_container_width=True)
+
+st.caption(
+    "※ 위 두 그래프는 평균 위험지수 차이가 작게 보이는 문제를 줄이기 위해 값 축을 자동 확대했습니다. "
+    "막대의 절대 길이보다 막대 끝 수치와 축 눈금을 함께 비교하세요."
+)
 
 s1, s2 = st.columns(2)
-with s1:
-    st.plotly_chart(px.scatter(core_summary, x="휴업일비율", y="최종위험지수", color="학교과정명", hover_name="학교표시명", title="휴업일비율과 최종위험지수"), use_container_width=True)
-with s2:
-    st.plotly_chart(px.scatter(core_summary, x="방학일수", y="최종위험지수", color="학교과정명", hover_name="학교표시명", title="방학일수와 최종위험지수"), use_container_width=True)
 
+with s1:
+    st.plotly_chart(
+        px.scatter(
+            core_summary,
+            x="휴업일비율",
+            y="최종위험지수",
+            color="학교과정명",
+            hover_name="학교표시명",
+            title="휴업일비율과 최종위험지수",
+        ),
+        use_container_width=True,
+    )
+
+with s2:
+    st.plotly_chart(
+        px.scatter(
+            core_summary,
+            x="방학일수",
+            y="최종위험지수",
+            color="학교과정명",
+            hover_name="학교표시명",
+            title="방학일수와 최종위험지수",
+        ),
+        use_container_width=True,
+    )
 # =========================================================
 # 학교 표 및 선택
 # =========================================================
