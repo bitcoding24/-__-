@@ -264,38 +264,111 @@ def build_calendar(daily_school: pd.DataFrame, start_date: str, end_date: str) -
 # 4. 기억점수 시뮬레이션
 # =========================================================
 
-def simulate_one_group(group: pd.DataFrame, M0: float, K1: float, C: float, D: float, R: float) -> pd.DataFrame:
+def simulate_one_group(
+    group: pd.DataFrame,
+    M0: float,
+    K1: float,
+    C: float,
+    D: float,
+    R: float,
+    review_effect: float,
+    review_decay_power: float,
+    study_start_date: str,
+    exam_date: str,
+) -> pd.DataFrame:
+    """
+    시험 공부 기간에 대해서만 기억점수/위험점수를 계산한다.
+
+    핵심 변화:
+    1. 공부 시작일에 memory = M0로 시작한다.
+    2. 수업일은 복습일로 보고 review_count를 1 증가시킨다.
+    3. 복습 횟수 review_count가 늘어날수록 이후 망각계수 k가 작아진다.
+    4. 시험 공부 기간 밖의 날짜는 계산에서 제외한다.
+    """
+
     group = group.sort_values("date").copy()
+
+    study_start_dt = pd.to_datetime(study_start_date)
+    exam_dt = pd.to_datetime(exam_date)
+
     memory = M0
     p = 0
+    review_count = 0
+    started = False
+
+    review_effect = max(0.0, float(review_effect))
+    review_decay_power = max(0.0, float(review_decay_power))
 
     memory_scores = []
     risk_scores = []
     k_values = []
     p_values = []
+    review_counts = []
+    review_factors = []
     calculation_types = []
+    is_exam_period_values = []
 
     for _, row in group.iterrows():
+        current_date = pd.to_datetime(row["date"])
+        is_exam_period = study_start_dt <= current_date <= exam_dt
+        is_exam_period_values.append(is_exam_period)
+
+        # 시험 공부 기간 밖은 계산하지 않음
+        if not is_exam_period:
+            memory_scores.append(np.nan)
+            risk_scores.append(np.nan)
+            k_values.append(np.nan)
+            p_values.append(np.nan)
+            review_counts.append(np.nan)
+            review_factors.append(np.nan)
+            calculation_types.append("시험기간 제외")
+            continue
+
+        # 시험 공부 시작 첫날부터 새 망각곡선 시작
+        if not started:
+            memory = M0
+            p = 0
+            review_count = 0
+            started = True
+
+        # 방학일은 기존 방식처럼 계산 제외
         if not row["is_main_analysis_day"]:
             memory_scores.append(np.nan)
             risk_scores.append(np.nan)
             k_values.append(np.nan)
             p_values.append(np.nan)
+            review_counts.append(review_count)
+            review_factors.append((1 + review_effect * review_count) ** review_decay_power)
             calculation_types.append("방학 제외")
-            memory = M0
-            p = 0
             continue
 
+        # 복습 누적 효과
+        # review_count가 커질수록 review_factor가 커지고,
+        # k는 그만큼 작아져서 망각 속도가 완만해진다.
         if row["is_main_rest_day"]:
             p += 1
-            k = K1 / ((1 + C * p) ** D)
+
+            review_factor = (1 + review_effect * review_count) ** review_decay_power
+
+            k = K1 / (
+                ((1 + C * p) ** D)
+                * review_factor
+            )
+
             memory = memory * math.exp(-k)
             calculation_type = "휴업일_망각"
+
         else:
+            # 수업일을 복습일로 처리
+            review_count += 1
+
             memory = memory + R * (M0 - memory)
+
             p = 0
             k = 0.0
-            calculation_type = "수업일_회복"
+
+            review_factor = (1 + review_effect * review_count) ** review_decay_power
+            calculation_type = "복습일_회복"
 
         memory = max(0.0, min(M0, memory))
         risk = M0 - memory
@@ -304,19 +377,35 @@ def simulate_one_group(group: pd.DataFrame, M0: float, K1: float, C: float, D: f
         risk_scores.append(risk)
         k_values.append(k)
         p_values.append(p)
+        review_counts.append(review_count)
+        review_factors.append(review_factor)
         calculation_types.append(calculation_type)
 
+    group["is_exam_period"] = is_exam_period_values
     group["memory_score"] = memory_scores
     group["risk_score"] = risk_scores
     group["k_value"] = k_values
     group["p_value"] = p_values
+    group["review_count"] = review_counts
+    group["review_factor"] = review_factors
     group["calculation_type"] = calculation_types
 
     return group
 
 
 @st.cache_data(show_spinner=False, max_entries=2)
-def simulate_memory(calendar: pd.DataFrame, M0: float, K1: float, C: float, D: float, R: float) -> pd.DataFrame:
+def simulate_memory(
+    calendar: pd.DataFrame,
+    M0: float,
+    K1: float,
+    C: float,
+    D: float,
+    R: float,
+    review_effect: float,
+    review_decay_power: float,
+    study_start_date: str,
+    exam_date: str,
+) -> pd.DataFrame:
     if calendar.empty:
         return calendar.copy()
 
@@ -325,9 +414,19 @@ def simulate_memory(calendar: pd.DataFrame, M0: float, K1: float, C: float, D: f
     sorted_calendar = calendar.sort_values(["분석단위ID", "date"]).copy()
 
     for unit_id, group in sorted_calendar.groupby("분석단위ID", sort=False):
-        simulated_group = simulate_one_group(group.copy(), M0, K1, C, D, R)
+        simulated_group = simulate_one_group(
+            group.copy(),
+            M0,
+            K1,
+            C,
+            D,
+            R,
+            review_effect,
+            review_decay_power,
+            study_start_date,
+            exam_date,
+        )
 
-        # pandas groupby/apply 버전 차이로 식별자 열이 빠지는 상황 방지
         if "분석단위ID" not in simulated_group.columns:
             simulated_group["분석단위ID"] = unit_id
 
@@ -354,7 +453,10 @@ def summarize_school(simulated: pd.DataFrame, vacation_check: pd.DataFrame, high
             f"현재 열 목록: {simulated.columns.tolist()}"
         )
 
-    analysis_data = simulated[simulated["is_main_analysis_day"]].copy()
+    analysis_data = simulated[
+    simulated["is_exam_period"] &
+    simulated["is_main_analysis_day"]
+    ].copy()
 
     school_summary = (
         analysis_data.groupby(group_cols)
@@ -422,32 +524,103 @@ def summarize_school(simulated: pd.DataFrame, vacation_check: pd.DataFrame, high
 # 6. 시각화 보조 함수
 # =========================================================
 
-def make_memory_figure(one_school: pd.DataFrame, school_name: str) -> go.Figure:
+def make_memory_figure(
+    one_school: pd.DataFrame,
+    school_name: str,
+    study_start_date,
+    exam_date,
+) -> go.Figure:
     df = one_school.sort_values("date").copy()
+    df["date"] = pd.to_datetime(df["date"])
+
+    study_start_dt = pd.to_datetime(study_start_date)
+    exam_dt = pd.to_datetime(exam_date)
+
+    df = df[
+        (df["date"] >= study_start_dt) &
+        (df["date"] <= exam_dt)
+    ].copy()
+
     df["memory_plot"] = df["memory_score"].where(~df["is_vacation_day"], np.nan)
     df["risk_plot"] = df["risk_score"].where(~df["is_vacation_day"], np.nan)
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df["date"], y=df["memory_plot"], mode="lines", name="기억점수", connectgaps=False))
-    fig.add_trace(go.Scatter(x=df["date"], y=df["risk_plot"], mode="lines", name="위험점수", connectgaps=False))
 
-    rest = df[df["is_main_rest_day"]]
     fig.add_trace(go.Scatter(
-        x=rest["date"], y=rest["memory_score"], mode="markers", name="휴업일",
-        marker=dict(size=5)
+        x=df["date"],
+        y=df["memory_plot"],
+        mode="lines+markers",
+        name="기억점수",
+        connectgaps=False,
+        hovertemplate="날짜=%{x}<br>기억점수=%{y:.2f}<extra></extra>",
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=df["date"],
+        y=df["risk_plot"],
+        mode="lines+markers",
+        name="위험점수",
+        connectgaps=False,
+        hovertemplate="날짜=%{x}<br>위험점수=%{y:.2f}<extra></extra>",
+    ))
+
+    review_days = df[df["calculation_type"] == "복습일_회복"]
+    fig.add_trace(go.Scatter(
+        x=review_days["date"],
+        y=review_days["memory_score"],
+        mode="markers",
+        name="복습일",
+        marker=dict(size=8, symbol="circle"),
+        hovertemplate=(
+            "복습일<br>"
+            "날짜=%{x}<br>"
+            "기억점수=%{y:.2f}<br>"
+            "누적 복습횟수=%{customdata[0]}<br>"
+            "복습 완만화 계수=%{customdata[1]:.2f}"
+            "<extra></extra>"
+        ),
+        customdata=review_days[["review_count", "review_factor"]],
+    ))
+
+    rest_days = df[df["calculation_type"] == "휴업일_망각"]
+    fig.add_trace(go.Scatter(
+        x=rest_days["date"],
+        y=rest_days["memory_score"],
+        mode="markers",
+        name="망각일",
+        marker=dict(size=8, symbol="x"),
+        hovertemplate=(
+            "망각일<br>"
+            "날짜=%{x}<br>"
+            "기억점수=%{y:.2f}<br>"
+            "연속 휴업일 p=%{customdata[0]}<br>"
+            "망각계수 k=%{customdata[1]:.4f}<br>"
+            "누적 복습횟수=%{customdata[2]}"
+            "<extra></extra>"
+        ),
+        customdata=rest_days[["p_value", "k_value", "review_count"]],
     ))
 
     fig.update_layout(
-        title=f"{school_name} 날짜별 기억점수·위험점수 변화",
+        title=(
+            f"{school_name} 시험 공부 기간 기억점수·위험점수 변화"
+            f"<br><sup>{study_start_dt.date()} ~ {exam_dt.date()}</sup>"
+        ),
         xaxis_title="날짜",
         yaxis_title="점수",
         yaxis=dict(range=[0, 100]),
-        height=430,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        margin=dict(l=20, r=20, t=70, b=20),
+        height=460,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+        ),
+        margin=dict(l=20, r=20, t=90, b=20),
     )
-    return fig
 
+    return fig
 
 def make_calendar_html(one_school: pd.DataFrame, month: str) -> str:
     df = one_school.copy()
@@ -559,10 +732,30 @@ with st.sidebar:
         accept_multiple_files=True,
     )
 
-    st.header("2. 분석 기간")
+        st.header("2. 분석 기간")
     start_date = st.date_input("시작일", value=pd.to_datetime("2025-03-01"))
     end_date = st.date_input("종료일", value=pd.to_datetime("2026-02-28"))
 
+    st.header("2-1. 시험 공부 기간")
+    study_start_date = st.date_input("공부 시작일", value=pd.to_datetime("2025-04-15"))
+    exam_date = st.date_input("시험일", value=pd.to_datetime("2025-04-30"))
+
+    st.header("3. 모델 파라미터")
+        review_effect = st.number_input(
+        "복습 누적 효과",
+        value=0.35,
+        min_value=0.0,
+        step=0.05,
+        help="값이 클수록 복습을 반복할 때 이후 망각 속도가 더 빠르게 완만해집니다."
+    )
+
+    review_decay_power = st.number_input(
+        "복습 효과 형태",
+        value=1.0,
+        min_value=0.1,
+        step=0.1,
+        help="값이 클수록 복습 누적 효과가 더 강하게 적용됩니다."
+    )
     st.header("3. 모델 파라미터")
     M0 = st.number_input("최대 기억점수 M0", value=100.0, min_value=1.0, step=1.0)
     K1 = st.number_input("초기 망각 속도 K1", value=0.35, min_value=0.0, step=0.01)
@@ -573,7 +766,14 @@ with st.sidebar:
     min_vacation_days = st.number_input("핵심 분석 포함 최소 방학일수", value=10, min_value=0, step=1)
 
     run_btn = st.button("🚀 분석 실행", type="primary", use_container_width=True)
+if pd.to_datetime(study_start_date) > pd.to_datetime(exam_date):
+    st.error("공부 시작일은 시험일보다 늦을 수 없습니다.")
+    st.stop()
 
+if pd.to_datetime(study_start_date) < pd.to_datetime(start_date) or pd.to_datetime(exam_date) > pd.to_datetime(end_date):
+    st.error("시험 공부 기간은 전체 분석 기간 안에 있어야 합니다.")
+    st.stop()
+    
 if run_btn:
     for key in [
         "raw_df",
@@ -598,7 +798,18 @@ if run_btn:
         with st.spinner("1년 전체 날짜표를 만드는 중..."):
             calendar, vacation_check = build_calendar(daily_school, str(start_date), str(end_date))
         with st.spinner("기억점수와 위험점수를 계산하는 중... 데이터가 크면 시간이 걸릴 수 있어요."):
-            simulated = simulate_memory(calendar, M0, K1, C, D, R)
+            simulated = simulate_memory(
+                calendar,
+                M0,
+                K1,
+                C,
+                D,
+                R,
+                review_effect,
+                review_decay_power,
+                str(study_start_date),
+                str(exam_date),
+            )
         with st.spinner("학교별 최종 위험지수를 요약하는 중..."):
             school_summary, core_summary = summarize_school(simulated, vacation_check, high_risk_threshold, min_vacation_days)
 
@@ -609,6 +820,8 @@ if run_btn:
         st.session_state["simulated"] = simulated
         st.session_state["school_summary"] = school_summary
         st.session_state["core_summary"] = core_summary
+        st.session_state["study_start_date"] = study_start_date
+        st.session_state["exam_date"] = exam_date
         st.success("분석 완료!")
 
 if "core_summary" not in st.session_state:
@@ -745,7 +958,25 @@ d3.metric("분석일수", f"{int(selected_row['분석일수']):,}일")
 d4.metric("방학일수", f"{int(selected_row['방학일수']):,}일")
 d5.metric("고위험일비율", f"{selected_row['고위험일비율']:.2f}%")
 
-st.plotly_chart(make_memory_figure(one_school, selected_row["학교표시명"]), use_container_width=True)
+active_study_start_date = st.session_state.get("study_start_date", study_start_date)
+active_exam_date = st.session_state.get("exam_date", exam_date)
+
+one_school_exam = one_school.copy()
+one_school_exam["date"] = pd.to_datetime(one_school_exam["date"])
+one_school_exam = one_school_exam[
+    (one_school_exam["date"] >= pd.to_datetime(active_study_start_date)) &
+    (one_school_exam["date"] <= pd.to_datetime(active_exam_date))
+].copy()
+
+st.plotly_chart(
+    make_memory_figure(
+        one_school,
+        selected_row["학교표시명"],
+        active_study_start_date,
+        active_exam_date,
+    ),
+    use_container_width=True,
+)
 
 # 월별 달력
 months = pd.date_range(pd.to_datetime(start_date), pd.to_datetime(end_date), freq="MS").strftime("%Y-%m").tolist()
