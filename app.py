@@ -72,12 +72,12 @@ st.markdown(
 
 APP_DIR = Path(__file__).resolve().parent
 DATA_CANDIDATES = [
-    APP_DIR / "schedule_preprocessed_daily.csv.gz",
-    APP_DIR / "data" / "schedule_preprocessed_daily.csv.gz",
+    APP_DIR / "ge_schedule_preprocessed_daily.csv.gz",
+    APP_DIR / "data" / "ge_schedule_preprocessed_daily.csv.gz",
     APP_DIR / "schedule_2025_04_preprocessed_daily.csv.gz",
     # 압축하지 않은 원본 CSV도 함께 찾도록 추가 (gz가 없을 때 대비)
-    APP_DIR / "schedule_preprocessed_daily.csv",
-    APP_DIR / "data" / "schedule_preprocessed_daily.csv",
+    APP_DIR / "ge_schedule_preprocessed_daily.csv",
+    APP_DIR / "data" / "ge_schedule_preprocessed_daily.csv",
 ]
 
 REQUIRED_PREPROCESSED_COLUMNS = [
@@ -612,7 +612,7 @@ try:
         source_label = packaged_data.name
     else:
         st.error(
-            "앱 폴더에서 `schedule_preprocessed_daily.csv.gz` 파일을 찾지 못했습니다. "
+            "앱 폴더에서 `ge_schedule_preprocessed_daily.csv.gz` 파일을 찾지 못했습니다. "
             "app.py와 같은 폴더(또는 data/ 폴더)에 데이터 파일을 함께 올려 주세요."
         )
         st.stop()
